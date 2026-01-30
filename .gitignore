@@ -1,0 +1,51 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.dll
+*.dylib
+*.so
+
+# Cloned repositories (large, fetch via setup.sh)
+MoltenVK/
+DXVK/
+SPIRV-Cross/
+
+# Logs and captures
+logs/
+captures/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Progress tracking (generated)
+progress.json
+
+# Xcode
+*.xcuserstate
+xcuserdata/
+DerivedData/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Claude Code
+.claude/
