@@ -49,3 +49,6 @@ DerivedData/
 
 # Claude Code
 .claude/
+
+# Wine prefix
+wine-prefix-11/

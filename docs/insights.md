@@ -1,95 +1,95 @@
-# Insights - MoltenVK FNV Project
+# MoltenVK + DXVK Insights
 
-## Wine Version Compatibility
+## Wine Version Matters
 
-### Critical Finding
-**Wine 8.0.1 (CrossOver FOSS 23.7.1) has broken winevulkan support for Vulkan 1.3+**
+**Problem:** Wine 8.0.1 (CrossOver FOSS 23.7.1) has broken winevulkan that reports physical device Vulkan version as "0.0.0" instead of the actual version.
 
-When DXVK queries the Vulkan device through Wine's winevulkan.dll, it reports:
-```
-Found device: Apple M4 Pro ( 0.0.0)
-Skipping: Device does not support Vulkan 1.3
-```
+**Solution:** Use Wine 11.0+ which has updated winevulkan support.
 
-The "0.0.0" version indicates winevulkan isn't properly translating the Vulkan API version from MoltenVK (which supports 1.4.334) to the Windows application.
-
-**Solution**: Use Wine 11.0+ which has updated winevulkan support.
-
-## 32-bit vs 64-bit Games
-
-### Important
-Fallout: New Vegas is a **32-bit game**. This means:
-- DXVK DLLs must be compiled with `i686-w64-mingw32-gcc` (not x86_64)
-- DLLs go in `syswow64/` directory (not `system32/`)
-- Check game architecture with: `file /path/to/game.exe`
-
-## DXVK Version Requirements
-
-| DXVK Version | Vulkan Requirement |
-|--------------|-------------------|
-| 1.x (up to 1.10.3) | Vulkan 1.2 |
-| 2.x (2.0+) | Vulkan 1.3 |
-
-If stuck with Vulkan 1.2, use DXVK 1.10.3, but note it may have compilation issues with GCC 15+ (missing `#include <cstdint>`).
-
-## MoltenVK Vulkan Support Timeline
-
-| MoltenVK Version | Vulkan Support | Release Date |
-|------------------|----------------|--------------|
-| 1.2.x | Vulkan 1.2 | Pre-2025 |
-| 1.3 | Vulkan 1.3 | May 2025 |
-| 1.4 | Vulkan 1.4 | August 2025 |
-
-## WineD3D as Fallback
-
-WineD3D (Wine's built-in D3D→OpenGL translation) works well on macOS via Apple's OpenGL-to-Metal layer. For games that don't need cutting-edge features, this path is often more stable than DXVK on macOS.
-
-**Detection**: Look for `wined3d` messages in Wine logs:
-```
-fixme:d3d:wined3d_guess_card_vendor Received unrecognized GL_VENDOR "Apple"
+```bash
+brew install --cask wine-stable  # Installs Wine 11.0
 ```
 
-## Cross-Compilation on Apple Silicon
+## MoltenVK Feature Limitations
 
-When building Windows DLLs on Apple Silicon Mac:
-1. Use Homebrew's mingw-w64: `brew install mingw-w64`
-2. For 32-bit: `i686-w64-mingw32-gcc`
-3. For 64-bit: `x86_64-w64-mingw32-gcc`
-4. Vulkan headers: Add `-I/opt/homebrew/include` to compiler flags
+MoltenVK (Metal backend) does NOT support these Vulkan features that DXVK wants:
 
-## MoltenVK ICD Configuration
+| Feature | Extension | Why Missing |
+|---------|-----------|-------------|
+| `geometryShader` | core | Metal has no geometry shaders |
+| `shaderCullDistance` | core | Metal limitation |
+| `depthClipEnable` | VK_EXT_depth_clip_enable | Not implemented |
+| `robustBufferAccess2` | VK_EXT_robustness2 | Not implemented |
+| `nullDescriptor` | VK_EXT_robustness2 | Not implemented |
+| `khrPipelineLibrary` | VK_KHR_pipeline_library | Not implemented |
 
-The ICD JSON file uses relative paths:
-```json
-{
-    "ICD": {
-        "library_path": "./libMoltenVK.dylib",
-        "api_version": "1.2.0"
-    }
+Verify with: `vulkaninfo 2>/dev/null | grep <feature_name>`
+
+## D3D9 Doesn't Need All Features
+
+Fallout New Vegas uses DirectX 9 with Shader Model 2.0:
+- **No geometry shaders** - Introduced in DX10/SM4.0
+- **No tessellation** - Introduced in DX11/SM5.0
+
+Many DXVK "required" features are only needed for D3D10/11 games.
+
+## DXVK Patching Strategy
+
+To make DXVK work on MoltenVK, patch `src/dxvk/dxvk_device_info.cpp`:
+
+1. **Bypass version check for Apple devices:**
+```cpp
+bool isAppleDevice = (m_properties.core.properties.vendorID == 0x106b);
+if (isAppleDevice && m_properties.core.properties.apiVersion < DxvkVulkanApiVersion) {
+  m_properties.core.properties.apiVersion = DxvkVulkanApiVersion;
 }
 ```
 
-Keep `libMoltenVK.dylib` in the same directory as the JSON file, then set:
-```bash
-export VK_ICD_FILENAMES="/path/to/MoltenVK_icd.json"
+2. **Change required features to optional:**
+```cpp
+ENABLE_FEATURE(core.features, geometryShader, false),  // was true
 ```
 
-## Steam Games in Wine
+## Wine Prefix Architecture
 
-Steam games require Steam to be running in the Wine prefix before launching:
+For 32-bit games like FNV on Wine64:
+- 64-bit DLLs go in `system32/`
+- 32-bit DLLs go in `syswow64/`
+
+DXVK d3d9.dll (32-bit) must be in `syswow64/` for FNV to find it.
+
+## DLL Override
+
+Set native d3d9 override:
 ```bash
-WINEPREFIX="/path/to/prefix" wine64 "/path/to/Steam/steam.exe" -silent &
-sleep 15  # Wait for Steam to initialize
+WINEPREFIX=/path/to/prefix wine reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v d3d9 /t REG_SZ /d native /f
 ```
 
-Otherwise you'll get "Application Load Error" from the game.
+## Known Issues
 
-## NVSE (Script Extender) Requirements
+### Visual Flickering
+Likely caused by:
+1. Missing `nullDescriptor` - unbound texture access undefined
+2. Missing `depthClipEnable` - depth clipping semantics differ
+3. Missing robustness features - OOB access returns garbage
 
-NVSE must be launched from the game directory:
+### Potential Fixes to Investigate
+1. DXVK config options for workarounds
+2. Older DXVK versions with fewer requirements
+3. MoltenVK patches to add missing features
+4. Shader patching to avoid problematic code paths
+
+## Useful Debug Environment Variables
+
 ```bash
-cd "/path/to/Fallout New Vegas"
-wine64 nvse_loader.exe
-```
+# DXVK logging
+DXVK_LOG_LEVEL=debug
+DXVK_LOG_PATH=/path/to/logs
 
-Running from a different directory causes "Couldn't find FalloutNV.exe" error.
+# MoltenVK logging
+MVK_CONFIG_LOG_LEVEL=3
+MVK_CONFIG_DEBUG=1
+
+# Wine debug
+WINEDEBUG=+loaddll
+```

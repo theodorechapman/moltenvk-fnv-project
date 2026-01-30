@@ -1,142 +1,90 @@
-# Session Summary - MoltenVK FNV Project Setup
+# Session Summary - January 30, 2026
 
-## Date: 2026-01-30
+## Major Breakthrough: Fallout New Vegas Running on MoltenVK/DXVK
 
-## Overview
-
-This session focused on setting up a development environment to run Fallout: New Vegas on macOS using DXVK (D3D9→Vulkan translation) and MoltenVK (Vulkan→Metal translation). The goal was to establish a TDD workflow for adding missing Vulkan features to MoltenVK.
+The game successfully launches and runs with DXVK on MoltenVK via Wine 11. Visual flickering issues remain to be fixed.
 
 ## What Was Accomplished
 
-### 1. Path Configuration
-All Wine prefix paths were updated to point to the user's existing Wine prefix:
-- **Wine Prefix**: `/Users/theo/.wine-fnv-mo2/`
-- **FNV Location**: `~/.wine-fnv-mo2/drive_c/Games/Steam/steamapps/common/Fallout New Vegas/`
-- **MO2 Location**: `~/.wine-fnv-mo2/drive_c/MO2/`
+### 1. Wine 11.0 Installed
+- Wine 8.0.1 (CrossOver) had broken winevulkan - reported device as version "0.0.0"
+- Wine 11.0 stable installed via Homebrew: `brew install --cask wine-stable`
+- Wine 11 correctly reports MoltenVK's Vulkan 1.4.334 support
 
-Files updated:
-- `Makefile` - `WINEPREFIX` and `FNV_DIR` variables
-- `env.sh` - Environment exports
-- `setup.sh` - Setup script paths
-- `tools/capture.py` - Python path references
-- `README.md` - Documentation
+### 2. Wine Prefix Created
+- Location: `wine-prefix-11/` in project directory
+- Contains Steam + Fallout New Vegas copied from previous prefix
+- DXVK d3d9.dll installed to `syswow64/` (for 32-bit games)
 
-### 2. Dependencies Installed
-Via Homebrew:
-- cmake, ninja, meson, python3
-- glslang, spirv-tools
-- mingw-w64 (for cross-compiling DXVK)
-- molten-vk, vulkan-headers, vulkan-loader, vulkan-tools
+### 3. DXVK Patched for MoltenVK Compatibility
+Multiple patches to `DXVK/src/dxvk/dxvk_device_info.cpp`:
 
-### 3. MoltenVK Built
-- Cloned from KhronosGroup/MoltenVK
-- Version: **v1.4.1** (supports Vulkan 1.4.334)
-- Built for macOS using `make macos`
-- Library copied to `build/moltenvk/libMoltenVK.dylib`
-
-### 4. DXVK Built
-- Both 32-bit and 64-bit versions built
-- Version: **2.7.1**
-- 32-bit DLLs installed to Wine prefix's `syswow64/` directory
-- 64-bit DLLs installed to `system32/` directory
-
-### 5. New Make Targets Added
-- `make run-fnv-nvse` - Run FNV with NVSE (for mods)
-- `make run-fnv-nvse-debug` - Run with NVSE + debugging
-
-## Current State & Blocking Issue
-
-### The Problem
-DXVK 2.7.1 requires Vulkan 1.3, and while MoltenVK 1.4.2 supports Vulkan 1.4.334, **Wine's winevulkan.dll reports the device as version "0.0.0"**.
-
-```
-info:  Found device: Apple M4 Pro ( 0.0.0)
-info:    Skipping: Device does not support Vulkan 1.3
-warn:  DXVK: No adapters found. A Vulkan 1.3 capable setup is required.
+**Apple Device Version Workaround** (lines 92-97):
+```cpp
+// MoltenVK/Apple workaround: winevulkan reports device version as 0.0.0
+// but MoltenVK actually supports Vulkan 1.3+. Apple vendor ID is 0x106b.
+bool isAppleDevice = (m_properties.core.properties.vendorID == 0x106b);
+if (isAppleDevice && m_properties.core.properties.apiVersion < DxvkVulkanApiVersion) {
+  m_properties.core.properties.apiVersion = DxvkVulkanApiVersion;
+}
 ```
 
-### Root Cause
-The user has **Wine 8.0.1 (CrossOver FOSS 23.7.1)** which has an older winevulkan implementation that doesn't properly expose Vulkan 1.3+ API versions from the host MoltenVK to Windows applications.
+**Disabled Required Features** (MoltenVK doesn't support these):
+- `geometryShader` - line 761: changed `true` to `false`
+- `shaderCullDistance` - line 773: changed `true` to `false`
+- `depthClipEnable` (extDepthClipEnable) - line 852: changed `true` to `false`
+- `robustBufferAccess2` (extRobustness2) - line 902: changed `true` to `false`
+- `nullDescriptor` (extRobustness2) - line 904: changed `true` to `false`
+- `khrPipelineLibrary` - line 943: changed `true` to `false`
 
-### Workaround That Works
-**WineD3D works perfectly!** When DXVK isn't loaded, Wine uses its built-in WineD3D which translates D3D9→OpenGL→Metal (via Apple's OpenGL-to-Metal layer). The game runs with no visual bugs using this path.
+### 4. Makefile Updated
+- `make run` - Rebuilds DXVK, installs to Wine prefix, runs game via NVSE
+- `make dxvk` - Just rebuilds and installs DXVK
+- WINEPREFIX now points to `wine-prefix-11/`
 
-## Next Steps for Future Sessions
+## Current State
 
-### Option 1: Upgrade Wine (Recommended)
-Install Wine 11.0 from Homebrew which has proper winevulkan support for Vulkan 1.3+:
-```bash
-brew install --cask wine-stable
-```
-Then use the new Wine binary explicitly instead of the CrossOver symlink.
+**Working:**
+- Game launcher opens and detects GPU
+- Game loads saves
+- 3D rendering works
 
-### Option 2: Use WineD3D
-The game works fine with WineD3D. If DXVK isn't strictly needed, this is a valid solution.
+**Issues:**
+- Visual flickering during loading
+- Bright flashes during gameplay
+- Frame flickering
 
-### Option 3: Debug winevulkan
-Investigate why Wine 8.0.1's winevulkan reports device version as 0.0.0 and potentially patch it.
+## Likely Causes of Flickering
 
-## Key Files & Locations
+1. **Missing `nullDescriptor`** - DXVK uses this for unbound textures/buffers. Without it, accessing unbound resources may cause visual glitches.
 
-| Item | Location |
-|------|----------|
-| Project Root | `/Users/theo/Coding/moltenvk-fnv-project/` |
-| Wine Prefix | `/Users/theo/.wine-fnv-mo2/` |
-| MoltenVK Source | `./MoltenVK/` |
-| MoltenVK Library | `./build/moltenvk/libMoltenVK.dylib` |
-| DXVK Source | `./DXVK/` |
-| DXVK 32-bit Build | `./DXVK/build.32/` |
-| DXVK 64-bit Build | `./DXVK/build.64/` |
-| FNV Executable | Wine prefix + `drive_c/Games/Steam/steamapps/common/Fallout New Vegas/FalloutNV.exe` |
-| NVSE Loader | Same directory + `nvse_loader.exe` |
+2. **Missing `depthClipEnable`** - D3D9 has specific depth clipping semantics. The comment in DXVK says "Depth clip matches D3D semantics where depth clamp does not"
 
-## Technical Details
+3. **Missing `robustBufferAccess2`** - Out-of-bounds buffer reads may return garbage instead of zeros
 
-### Game Architecture
-- **Fallout: New Vegas** is a **32-bit** game (PE32 Intel 80386)
-- Uses DirectX 9 for graphics
-- Has NVSE (New Vegas Script Extender) installed
-- Managed with Mod Organizer 2 (MO2)
+## Next Steps
 
-### Translation Paths
-1. **DXVK Path** (not working due to Wine version):
-   ```
-   D3D9 → DXVK → Vulkan → winevulkan.dll → MoltenVK → Metal
-   ```
+1. **Investigate flickering** - Enable DXVK debug logging to see what's happening
+2. **Try DXVK config options** - There may be workarounds for missing features
+3. **Consider older DXVK version** - Older versions may have fewer feature requirements
+4. **Research MoltenVK patches** - Some features might be implementable
 
-2. **WineD3D Path** (working):
-   ```
-   D3D9 → WineD3D → OpenGL → Apple OpenGL-to-Metal → Metal
-   ```
+## Key Files Modified
 
-### Wine Binary Location
-```
-/opt/homebrew/bin/wine64 -> /Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine64
-```
+- `DXVK/src/dxvk/dxvk_device_info.cpp` - Feature requirements
+- `Makefile` - Build and run targets
+- `wine-prefix-11/drive_c/windows/syswow64/d3d9.dll` - Patched DXVK DLL
+- `wine-prefix-11/drive_c/Games/Steam/steamapps/common/Fallout New Vegas/dxvk.conf` - DXVK config
 
-## Commands for Testing
+## Commands
 
 ```bash
-# Load environment
-source env.sh
+# Rebuild and run
+make run
 
-# Test Vulkan (native)
-VK_ICD_FILENAMES="$PWD/build/moltenvk/MoltenVK_icd.json" vulkaninfo --summary
+# Just rebuild DXVK
+make dxvk
 
-# Run FNV with NVSE (uses WineD3D currently)
-make run-fnv-nvse
-
-# Run FNV with debugging
-make run-fnv-nvse-debug
-```
-
-## Environment Variables for DXVK
-
-When Wine's winevulkan is fixed, these should work:
-```bash
-WINEPREFIX="/Users/theo/.wine-fnv-mo2"
-VK_ICD_FILENAMES="/Users/theo/Coding/moltenvk-fnv-project/build/moltenvk/MoltenVK_icd.json"
-WINEDLLOVERRIDES="d3d9=n,b;dxgi=n,b"
-MVK_CONFIG_LOG_LEVEL=2
-DXVK_LOG_LEVEL=info
+# Check MoltenVK feature support
+vulkaninfo 2>/dev/null | grep -E "geometryShader|nullDescriptor|robustBuffer"
 ```

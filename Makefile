@@ -4,11 +4,14 @@
 PROJECT_ROOT := $(shell pwd)
 MOLTENVK_DIR := $(PROJECT_ROOT)/MoltenVK
 DXVK_DIR := $(PROJECT_ROOT)/DXVK
-WINEPREFIX := /Users/theo/.wine-fnv-mo2
+WINEPREFIX := $(PROJECT_ROOT)/wine-prefix-11
 FNV_DIR := $(WINEPREFIX)/drive_c/Games/Steam/steamapps/common/Fallout New Vegas
 MO2_DIR := $(WINEPREFIX)/drive_c/MO2
 LOGS_DIR := $(PROJECT_ROOT)/logs
 BUILD_DIR := $(PROJECT_ROOT)/build
+
+# Wine 11 prefix for development
+WINE11_PREFIX := $(PROJECT_ROOT)/wine-prefix-11
 
 # Colors for output
 RED := \033[0;31m
@@ -16,7 +19,7 @@ GREEN := \033[0;32m
 YELLOW := \033[1;33m
 NC := \033[0m
 
-.PHONY: all build-mvk build-dxvk test run-fnv clean logs help
+.PHONY: all build-mvk build-dxvk dxvk run test run-fnv clean logs help
 
 # ============================================
 # Main targets
@@ -68,12 +71,31 @@ build-mvk:
 	@echo "$(GREEN)MoltenVK built successfully$(NC)"
 
 build-dxvk:
-	@echo "$(YELLOW)Building DXVK...$(NC)"
-	cd $(DXVK_DIR)/build.64 && ninja
+	@echo "$(YELLOW)Building DXVK (32-bit for FNV)...$(NC)"
+	cd $(DXVK_DIR) && meson compile -C build.32
 	@mkdir -p $(BUILD_DIR)/dxvk
-	@cp $(DXVK_DIR)/build.64/src/d3d9/d3d9.dll $(BUILD_DIR)/dxvk/ 2>/dev/null || true
-	@cp $(DXVK_DIR)/build.64/src/dxgi/dxgi.dll $(BUILD_DIR)/dxvk/ 2>/dev/null || true
-	@echo "$(GREEN)DXVK built (check for errors above)$(NC)"
+	@cp $(DXVK_DIR)/build.32/src/d3d9/d3d9.dll $(BUILD_DIR)/dxvk/ 2>/dev/null || true
+	@cp $(DXVK_DIR)/build.32/src/dxgi/dxgi.dll $(BUILD_DIR)/dxvk/ 2>/dev/null || true
+	@echo "$(GREEN)DXVK built$(NC)"
+
+# Quick rebuild DXVK and install to Wine prefix
+dxvk: build-dxvk
+	@echo "$(YELLOW)Installing DXVK to Wine 11 prefix...$(NC)"
+	@cp $(DXVK_DIR)/build.32/src/d3d9/d3d9.dll $(WINE11_PREFIX)/drive_c/windows/syswow64/
+	@echo "$(GREEN)DXVK d3d9.dll installed to syswow64$(NC)"
+
+# Main development run target: rebuild DXVK if needed, clear logs, run game
+run: dxvk
+	@echo "$(YELLOW)Clearing old logs...$(NC)"
+	@rm -f $(LOGS_DIR)/*.log
+	@rm -f "$(FNV_DIR)"/*.log
+	@rm -f "$(FNV_DIR)"/FalloutNV_d3d9.log
+	@echo "$(YELLOW)Running Fallout NV via NVSE...$(NC)"
+	@mkdir -p $(LOGS_DIR)
+	cd "$(FNV_DIR)" && \
+	WINEPREFIX=$(WINEPREFIX) \
+	DXVK_LOG_LEVEL=info \
+	wine nvse_loader.exe 2>&1 | tee $(LOGS_DIR)/wine.log
 
 build-tests:
 	@echo "$(YELLOW)Building unit tests...$(NC)"
@@ -169,10 +191,10 @@ run-fnv-nvse-debug: install-dxvk
 
 install-dxvk:
 	@echo "$(YELLOW)Installing DXVK to Wine prefix...$(NC)"
-	@mkdir -p $(WINEPREFIX)/drive_c/windows/system32
-	@cp $(BUILD_DIR)/dxvk/*.dll $(WINEPREFIX)/drive_c/windows/system32/ 2>/dev/null || \
-		echo "$(RED)No DXVK DLLs found - build DXVK first$(NC)"
-	@echo "$(GREEN)DXVK installed$(NC)"
+	@mkdir -p $(WINEPREFIX)/drive_c/windows/syswow64
+	@cp $(BUILD_DIR)/dxvk/d3d9.dll $(WINEPREFIX)/drive_c/windows/syswow64/ 2>/dev/null || \
+		echo "$(RED)No DXVK DLLs found - run 'make dxvk' first$(NC)"
+	@echo "$(GREEN)DXVK installed to syswow64 (32-bit)$(NC)"
 
 install-mvk:
 	@echo "$(YELLOW)Installing MoltenVK...$(NC)"
