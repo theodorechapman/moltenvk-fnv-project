@@ -19,7 +19,7 @@ GREEN := \033[0;32m
 YELLOW := \033[1;33m
 NC := \033[0m
 
-.PHONY: all build-mvk build-dxvk dxvk run test run-fnv clean logs help
+.PHONY: all build-mvk build-dxvk dxvk run test run-fnv clean logs help clear
 
 # ============================================
 # Main targets
@@ -58,6 +58,7 @@ help:
 	@echo "  make install-dxvk   - Install DXVK to Wine prefix"
 	@echo "  make clean          - Clean build artifacts"
 	@echo "  make clean-logs     - Clean log files"
+	@echo "  make clear          - Close all Wine applications and shut down wineserver"
 
 # ============================================
 # Build targets
@@ -84,18 +85,37 @@ dxvk: build-dxvk
 	@cp $(DXVK_DIR)/build.32/src/d3d9/d3d9.dll $(WINE11_PREFIX)/drive_c/windows/syswow64/
 	@echo "$(GREEN)DXVK d3d9.dll installed to syswow64$(NC)"
 
-# Main development run target: rebuild DXVK if needed, clear logs, run game
+# Main development run target: rebuild DXVK if needed, clear logs/cache, run game
 run: dxvk
-	@echo "$(YELLOW)Clearing old logs...$(NC)"
+	@echo "$(YELLOW)Clearing old logs and shader cache...$(NC)"
 	@rm -f $(LOGS_DIR)/*.log
 	@rm -f "$(FNV_DIR)"/*.log
 	@rm -f "$(FNV_DIR)"/FalloutNV_d3d9.log
+	@rm -f "$(FNV_DIR)"/*.dxvk-cache
 	@echo "$(YELLOW)Running Fallout NV via NVSE...$(NC)"
 	@mkdir -p $(LOGS_DIR)
 	cd "$(FNV_DIR)" && \
 	WINEPREFIX=$(WINEPREFIX) \
+	MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1 \
+	MVK_ALLOW_METAL_FENCES=1 \
+	MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 \
 	DXVK_LOG_LEVEL=info \
 	wine nvse_loader.exe 2>&1 | tee $(LOGS_DIR)/wine.log
+
+# Run in Wine virtual desktop (avoids macOS fullscreen issues)
+run-vd: dxvk
+	@echo "$(YELLOW)Clearing old logs...$(NC)"
+	@rm -f $(LOGS_DIR)/*.log
+	@rm -f "$(FNV_DIR)"/*.log
+	@echo "$(YELLOW)Running Fallout NV in virtual desktop (1920x1080)...$(NC)"
+	@mkdir -p $(LOGS_DIR)
+	cd "$(FNV_DIR)" && \
+	WINEPREFIX=$(WINEPREFIX) \
+	MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1 \
+	MVK_ALLOW_METAL_FENCES=1 \
+	MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 \
+	DXVK_LOG_LEVEL=info \
+	wine explorer /desktop=FNV,1920x1080 nvse_loader.exe 2>&1 | tee $(LOGS_DIR)/wine.log
 
 build-tests:
 	@echo "$(YELLOW)Building unit tests...$(NC)"
@@ -240,6 +260,14 @@ clean:
 
 clean-logs:
 	rm -f $(LOGS_DIR)/*.log
+
+clear:
+	@echo "$(YELLOW)Closing all Wine applications and shutting down wineserver...$(NC)"
+	@WINEPREFIX=$(WINEPREFIX) wineserver -k 2>/dev/null || true
+	@killall wine64 2>/dev/null || true
+	@killall wine 2>/dev/null || true
+	@killall wineserver 2>/dev/null || true
+	@echo "$(GREEN)Wine processes terminated$(NC)"
 
 # ============================================
 # Development iteration helpers

@@ -1,0 +1,400 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index e14333cf..a92ff630 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -7532,8 +7532,12 @@ namespace dxvk {
+   void D3D9DeviceEx::BindTexture(DWORD StateSampler) {
+     auto shaderSampler = RemapStateSamplerShader(StateSampler);
+ 
+-    uint32_t slot = computeResourceSlotId(shaderSampler.first,
++    // Bind to both color and depth slots (MoltenVK/Metal compatibility)
++    // The shader declares separate bindings for color and depth sampling
++    uint32_t colorSlot = computeResourceSlotId(shaderSampler.first,
+       DxsoBindingType::Image, uint32_t(shaderSampler.second));
++    uint32_t depthSlot = computeResourceSlotId(shaderSampler.first,
++      DxsoBindingType::DepthImage, uint32_t(shaderSampler.second));
+ 
+     const bool srgb =
+       m_state.samplerStates[StateSampler][D3DSAMP_SRGBTEXTURE] & 0x1;
+@@ -7544,11 +7548,16 @@ namespace dxvk {
+     Rc<DxvkImageView> imageView = commonTex->GetSampleView(srgb);
+ 
+     EmitCs([
+-      cSlot = slot,
++      cColorSlot = colorSlot,
++      cDepthSlot = depthSlot,
+       cImageView = std::move(imageView)
+     ](DxvkContext* ctx) mutable {
+       VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+-      ctx->bindResourceImageView(stage, cSlot, std::move(cImageView));
++      // Bind to both color and depth slots since the shader may sample as either
++      // Make a copy for the first bind since we need to move the second one
++      Rc<DxvkImageView> colorView = cImageView;
++      ctx->bindResourceImageView(stage, cColorSlot, std::move(colorView));
++      ctx->bindResourceImageView(stage, cDepthSlot, std::move(cImageView));
+     });
+   }
+ 
+@@ -7560,11 +7569,15 @@ namespace dxvk {
+       for (uint32_t i : bit::BitMask(cMask)) {
+         auto shaderSampler = RemapStateSamplerShader(i);
+ 
+-        uint32_t slot = computeResourceSlotId(shaderSampler.first,
++        // Unbind both color and depth slots (MoltenVK/Metal compatibility)
++        uint32_t colorSlot = computeResourceSlotId(shaderSampler.first,
+           DxsoBindingType::Image, uint32_t(shaderSampler.second));
++        uint32_t depthSlot = computeResourceSlotId(shaderSampler.first,
++          DxsoBindingType::DepthImage, uint32_t(shaderSampler.second));
+ 
+         VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+-        ctx->bindResourceImageView(stage, slot, nullptr);
++        ctx->bindResourceImageView(stage, colorSlot, nullptr);
++        ctx->bindResourceImageView(stage, depthSlot, nullptr);
+       }
+     });
+   }
+@@ -8897,8 +8910,11 @@ namespace dxvk {
+ 
+       for (uint32_t i = 0; i < cSize; i++) {
+         auto samplerInfo = RemapStateSamplerShader(DWORD(i));
+-        uint32_t slot = computeResourceSlotId(samplerInfo.first, DxsoBindingType::Image, uint32_t(samplerInfo.second));
+-        ctx->bindResourceImageView(stage, slot, nullptr);
++        // Unbind both color and depth slots (MoltenVK/Metal compatibility)
++        uint32_t colorSlot = computeResourceSlotId(samplerInfo.first, DxsoBindingType::Image, uint32_t(samplerInfo.second));
++        uint32_t depthSlot = computeResourceSlotId(samplerInfo.first, DxsoBindingType::DepthImage, uint32_t(samplerInfo.second));
++        ctx->bindResourceImageView(stage, colorSlot, nullptr);
++        ctx->bindResourceImageView(stage, depthSlot, nullptr);
+       }
+     });
+ 
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+index f508ef93..78af7323 100644
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -2475,9 +2475,15 @@ namespace dxvk {
+ 
+     // Samplers
+     for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
++      // Compute separate bindings for color and depth textures
++      // This is required for MoltenVK/Metal compatibility as Metal doesn't allow
++      // two resources at the same binding index
+       const uint32_t imageBindingId = computeResourceSlotId(DxsoProgramType::PixelShader,
+         DxsoBindingType::Image, i);
++      const uint32_t depthImageBindingId = computeResourceSlotId(DxsoProgramType::PixelShader,
++        DxsoBindingType::DepthImage, i);
+ 
++      // Color/regular image binding
+       auto& imageBinding = m_bindings.emplace_back();
+       imageBinding.set             = 0u;
+       imageBinding.binding         = imageBindingId;
+@@ -2486,6 +2492,15 @@ namespace dxvk {
+       imageBinding.viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+       imageBinding.access          = VK_ACCESS_SHADER_READ_BIT;
+ 
++      // Depth/shadow image binding (separate for MoltenVK/Metal compatibility)
++      auto& depthImageBinding = m_bindings.emplace_back();
++      depthImageBinding.set             = 0u;
++      depthImageBinding.binding         = depthImageBindingId;
++      depthImageBinding.resourceIndex   = depthImageBindingId;
++      depthImageBinding.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++      depthImageBinding.viewType        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
++      depthImageBinding.access          = VK_ACCESS_SHADER_READ_BIT;
++
+       auto& samplerBinding = m_bindings.emplace_back();
+       samplerBinding.resourceIndex   = imageBindingId;
+       samplerBinding.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+@@ -2536,7 +2551,8 @@ namespace dxvk {
+         m_module.setDebugName(sampler.imageVarId, name.c_str());
+ 
+         m_module.decorateDescriptorSet(sampler.imageVarId, 0);
+-        m_module.decorateBinding(sampler.imageVarId, imageBindingId);
++        // Use separate binding for depth/shadow textures (MoltenVK/Metal compatibility)
++        m_module.decorateBinding(sampler.imageVarId, isDepth ? depthImageBindingId : imageBindingId);
+       }
+     }
+ 
+diff --git a/src/d3d9/d3d9_util.cpp b/src/d3d9/d3d9_util.cpp
+index 037b9d4c..86d97953 100644
+--- a/src/d3d9/d3d9_util.cpp
++++ b/src/d3d9/d3d9_util.cpp
+@@ -137,25 +137,28 @@ namespace dxvk {
+ 
+ 
+   DxvkInputAssemblyState DecodeInputAssemblyState(D3DPRIMITIVETYPE type) {
++    // MoltenVK/Metal always has primitive restart enabled and cannot disable it.
++    // Enable it for all topologies - D3D9 doesn't use restart indices (0xFFFF/0xFFFFFFFF)
++    // so this is safe and avoids pipeline compilation failures on Metal.
+     switch (type) {
+       default:
+       case D3DPT_TRIANGLELIST:
+-        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false);
++        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
+ 
+       case D3DPT_POINTLIST:
+-        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_POINT_LIST, false);
++        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_POINT_LIST, true);
+ 
+       case D3DPT_LINELIST:
+-        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_LINE_LIST, false);
++        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_LINE_LIST, true);
+ 
+       case D3DPT_LINESTRIP:
+-        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, false);
++        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, true);
+ 
+       case D3DPT_TRIANGLESTRIP:
+-        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, false);
++        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true);
+ 
+       case D3DPT_TRIANGLEFAN:
+-        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, false);
++        return DxvkInputAssemblyState(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, true);
+     }
+   }
+ 
+diff --git a/src/d3d9/shaders/d3d9_fixed_function_common.glsl b/src/d3d9/shaders/d3d9_fixed_function_common.glsl
+index 7e262e9a..c43accfc 100644
+--- a/src/d3d9/shaders/d3d9_fixed_function_common.glsl
++++ b/src/d3d9/shaders/d3d9_fixed_function_common.glsl
+@@ -38,7 +38,8 @@ spirv_instruction(set = "GLSL.std.450", id = 81) vec4 spvNClamp(vec4, vec4, vec4
+ 
+ // Dynamic "spec constants"
+ // Binding has to match with getSpecConstantBufferSlot in dxso_util.h
+-layout(set = 0, binding = 31, scalar) uniform SpecConsts {
++// = 51 (with doubled texture slots for MoltenVK/Metal compatibility)
++layout(set = 0, binding = 51, scalar) uniform SpecConsts {
+     uint dynamicSpecConstDword[20];
+ };
+ 
+diff --git a/src/d3d9/shaders/d3d9_fixed_function_frag.glsl b/src/d3d9/shaders/d3d9_fixed_function_frag.glsl
+index 73c2acee..b7645312 100644
+--- a/src/d3d9/shaders/d3d9_fixed_function_frag.glsl
++++ b/src/d3d9/shaders/d3d9_fixed_function_frag.glsl
+@@ -117,8 +117,8 @@ const uint PerTextureStageSpecConsts = SpecFFTextureStage1ColorOp - SpecFFTextur
+ //     DxsoProgramType::PixelShader,
+ //     DxsoBindingType::ConstantBuffer,
+ //     DxsoConstantBuffers::PSFixedFunction
+-// ) = 11
+-layout(set = 0, binding = 11, scalar, row_major) uniform ShaderData {
++// ) = 15 (with doubled texture slots for MoltenVK/Metal compatibility)
++layout(set = 0, binding = 15, scalar, row_major) uniform ShaderData {
+     D3D9FixedFunctionPS data;
+ };
+ 
+@@ -127,8 +127,8 @@ layout(set = 0, binding = 11, scalar, row_major) uniform ShaderData {
+ //     DxsoProgramType::PixelShader,
+ //     DxsoBindingType::ConstantBuffer,
+ //     DxsoConstantBuffers::PSShared
+-// ) = 12
+-layout(set = 0, binding = 12, scalar, row_major) uniform SharedData {
++// ) = 16 (with doubled texture slots for MoltenVK/Metal compatibility)
++layout(set = 0, binding = 16, scalar, row_major) uniform SharedData {
+     D3D9SharedPS sharedData;
+ };
+ 
+@@ -138,9 +138,10 @@ layout(push_constant, scalar, row_major) uniform RenderStates {
+     layout(offset = MaxSharedPushDataSize) uint packedSamplerIndices[TextureStageCount / 2];
+ };
+ 
+-layout(set = 0, binding = 13) uniform texture2D t2d[TextureStageCount];
+-layout(set = 0, binding = 13) uniform textureCube tcube[TextureStageCount];
+-layout(set = 0, binding = 13) uniform texture3D t3d[TextureStageCount];
++// Binding 17 = computeResourceSlotId(PS, Image, 0) with doubled texture slots
++layout(set = 0, binding = 17) uniform texture2D t2d[TextureStageCount];
++layout(set = 0, binding = 17) uniform textureCube tcube[TextureStageCount];
++layout(set = 0, binding = 17) uniform texture3D t3d[TextureStageCount];
+ 
+ layout(set = 1, binding = 0) uniform sampler sampler_heap[];
+ 
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index d5234ce2..f1348e17 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -752,21 +752,28 @@ namespace dxvk {
+       m_module.decorateBinding      (sampler.imageVarId, bindingId);
+     };
+ 
+-    const uint32_t binding = computeResourceSlotId(m_programInfo.type(),
++    // Compute separate bindings for color and depth textures
++    // This is required for MoltenVK/Metal compatibility as Metal doesn't allow
++    // two resources at the same binding index
++    const uint32_t colorBinding = computeResourceSlotId(m_programInfo.type(),
+       DxsoBindingType::Image,
+       idx);
++    const uint32_t depthBinding = computeResourceSlotId(m_programInfo.type(),
++      DxsoBindingType::DepthImage,
++      idx);
+ 
+     const bool implicit = m_programInfo.majorVersion() < 2 || m_moduleInfo.options.forceSamplerTypeSpecConstants;
+ 
+     if (!implicit) {
+-      DxsoSamplerType samplerType = 
++      DxsoSamplerType samplerType =
+         SamplerTypeFromTextureType(type);
+ 
+-      DclSampler(idx, binding, samplerType, false, implicit);
++      DclSampler(idx, colorBinding, samplerType, false, implicit);
+ 
+       if (samplerType != SamplerTypeTexture3D) {
+         // We could also be depth compared!
+-        DclSampler(idx, binding, samplerType, true, implicit);
++        // Use separate binding for depth/shadow texture (MoltenVK/Metal compatibility)
++        DclSampler(idx, depthBinding, samplerType, true, implicit);
+       }
+ 
+       const uint32_t offset = idx * 2;
+@@ -779,25 +786,36 @@ namespace dxvk {
+       for (uint32_t i = 0; i < SamplerTypeCount; i++) {
+         auto samplerType = static_cast<DxsoSamplerType>(i);
+ 
+-        DclSampler(idx, binding, samplerType, false, implicit);
++        DclSampler(idx, colorBinding, samplerType, false, implicit);
+ 
+         if (samplerType != SamplerTypeTexture3D)
+-          DclSampler(idx, binding, samplerType, true, implicit);
++          // Use separate binding for depth/shadow texture (MoltenVK/Metal compatibility)
++          DclSampler(idx, depthBinding, samplerType, true, implicit);
+       }
+     }
+ 
+     m_samplers[idx].type = type;
+ 
++    // Color/regular image binding
+     auto& imageBinding = m_bindings.emplace_back();
+     imageBinding.set             = 0u;
+-    imageBinding.binding         = binding;
+-    imageBinding.resourceIndex   = binding;
++    imageBinding.binding         = colorBinding;
++    imageBinding.resourceIndex   = colorBinding;
+     imageBinding.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+     imageBinding.viewType        = implicit ? VK_IMAGE_VIEW_TYPE_MAX_ENUM : viewType;
+     imageBinding.access          = VK_ACCESS_SHADER_READ_BIT;
+ 
++    // Depth/shadow image binding (separate for MoltenVK/Metal compatibility)
++    auto& depthImageBinding = m_bindings.emplace_back();
++    depthImageBinding.set             = 0u;
++    depthImageBinding.binding         = depthBinding;
++    depthImageBinding.resourceIndex   = depthBinding;
++    depthImageBinding.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++    depthImageBinding.viewType        = implicit ? VK_IMAGE_VIEW_TYPE_MAX_ENUM : viewType;
++    depthImageBinding.access          = VK_ACCESS_SHADER_READ_BIT;
++
+     auto& samplerBinding = m_bindings.emplace_back();
+-    samplerBinding.resourceIndex  = binding;
++    samplerBinding.resourceIndex  = colorBinding;
+     samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+     samplerBinding.blockOffset    = GetPushSamplerOffset(idx);
+     samplerBinding.flags.set(DxvkDescriptorFlag::PushData);
+diff --git a/src/dxso/dxso_util.h b/src/dxso/dxso_util.h
+index d027d6fc..641ed69c 100644
+--- a/src/dxso/dxso_util.h
++++ b/src/dxso/dxso_util.h
+@@ -12,6 +12,7 @@ namespace dxvk {
+   enum class DxsoBindingType : uint32_t {
+     ConstantBuffer,
+     Image,
++    DepthImage,  // Shadow/depth textures - separate bindings for MoltenVK/Metal compatibility
+   };
+ 
+   enum class DxsoConstantBufferType : uint32_t {
+@@ -40,17 +41,30 @@ namespace dxvk {
+         DxsoProgramType shaderStage,
+         DxsoBindingType bindingType,
+         uint32_t        bindingIndex) {
+-    const uint32_t stageOffset = (DxsoConstantBuffers::VSCount + caps::MaxTexturesVS) * uint32_t(shaderStage);
++    // Layout per shader stage:
++    //   [0..CBCount-1]                          = Constant buffers
++    //   [CBCount..CBCount+MaxTex-1]             = Color/regular images
++    //   [CBCount+MaxTex..CBCount+2*MaxTex-1]    = Depth/shadow images (for MoltenVK/Metal compatibility)
++    const uint32_t cbCount = (shaderStage == DxsoProgramType::PixelShader)
++      ? DxsoConstantBuffers::PSCount
++      : DxsoConstantBuffers::VSCount;
++    const uint32_t maxTex = (shaderStage == DxsoProgramType::PixelShader)
++      ? caps::MaxTexturesPS
++      : caps::MaxTexturesVS;
++    const uint32_t stageOffset = (DxsoConstantBuffers::VSCount + caps::MaxTexturesVS * 2) * uint32_t(shaderStage);
+ 
+     if (bindingType == DxsoBindingType::ConstantBuffer)
+       return bindingIndex + stageOffset;
+-    else // if (bindingType == DxsoBindingType::Image)
+-      return bindingIndex + stageOffset + (shaderStage == DxsoProgramType::PixelShader ? DxsoConstantBuffers::PSCount : DxsoConstantBuffers::VSCount);
++    else if (bindingType == DxsoBindingType::Image)
++      return bindingIndex + stageOffset + cbCount;
++    else // if (bindingType == DxsoBindingType::DepthImage)
++      return bindingIndex + stageOffset + cbCount + maxTex;
+   }
+ 
+   // TODO: Intergrate into compute resource slot ID/refactor all of this?
+   constexpr uint32_t getSWVPBufferSlot() {
+-    return DxsoConstantBuffers::VSCount + caps::MaxTexturesVS + DxsoConstantBuffers::PSCount + caps::MaxTexturesPS + 1; // From last pixel shader slot, above.
++    // Account for doubled texture slots (color + depth) for MoltenVK/Metal compatibility
++    return DxsoConstantBuffers::VSCount + caps::MaxTexturesVS * 2 + DxsoConstantBuffers::PSCount + caps::MaxTexturesPS * 2 + 1; // From last pixel shader slot, above.
+   }
+ 
+   constexpr uint32_t getSpecConstantBufferSlot() {
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index 356bcde1..51c3377d 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -89,6 +89,13 @@ namespace dxvk {
+     auto vk = instance.vki();
+     vk->vkGetPhysicalDeviceProperties(adapter, &m_properties.core.properties);
+ 
++    // MoltenVK/Apple workaround: winevulkan reports device version as 0.0.0
++    // but MoltenVK actually supports Vulkan 1.3+. Apple vendor ID is 0x106b.
++    bool isAppleDevice = (m_properties.core.properties.vendorID == 0x106b);
++    if (isAppleDevice && m_properties.core.properties.apiVersion < DxvkVulkanApiVersion) {
++      m_properties.core.properties.apiVersion = DxvkVulkanApiVersion;
++    }
++
+     if (m_properties.core.properties.apiVersion < DxvkVulkanApiVersion)
+       return;
+ 
+@@ -751,7 +758,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, fillModeNonSolid, true),
+       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, false),
+       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
+-      ENABLE_FEATURE(core.features, geometryShader, true),
++      ENABLE_FEATURE(core.features, geometryShader, false),  // MoltenVK: not required for D3D9
+       ENABLE_FEATURE(core.features, imageCubeArray, true),
+       ENABLE_FEATURE(core.features, independentBlend, true),
+       ENABLE_FEATURE(core.features, logicOp, false),
+@@ -763,7 +770,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, sampleRateShading, true),
+       ENABLE_FEATURE(core.features, samplerAnisotropy, false),
+       ENABLE_FEATURE(core.features, shaderClipDistance, true),
+-      ENABLE_FEATURE(core.features, shaderCullDistance, true),
++      ENABLE_FEATURE(core.features, shaderCullDistance, false),  // MoltenVK: not supported
+       ENABLE_FEATURE(core.features, shaderFloat64, false),
+       ENABLE_FEATURE(core.features, shaderImageGatherExtended, true),
+       ENABLE_FEATURE(core.features, shaderInt16, false),
+@@ -842,7 +849,7 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extCustomBorderColor, customBorderColorWithoutFormat, false),
+ 
+       /* Depth clip matches D3D semantics where depth clamp does not */
+-      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, true),
++      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, false),  // MoltenVK: not supported
+ 
+       /* Controls depth bias behaviour with emulated depth formats */
+       ENABLE_EXT_FEATURE(extDepthBiasControl, depthBiasControl, false),
+@@ -892,9 +899,9 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extPageableDeviceLocalMemory, pageableDeviceLocalMemory, false),
+ 
+       /* Robustness, all features effectively required for correctness */
+-      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, true),
++      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, false),  // MoltenVK: not supported
+       ENABLE_EXT_FEATURE(extRobustness2, robustImageAccess2, false),
+-      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, true),
++      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, false),  // MoltenVK: not supported
+ 
+       /* Sample locations, used to "disable" MSAA rendering */
+       ENABLE_EXT(extSampleLocations, false),
+@@ -933,7 +940,7 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(khrMaintenance7, maintenance7, false),
+ 
+       /* Dependency for graphics pipeline library */
+-      ENABLE_EXT(khrPipelineLibrary, true),
++      ENABLE_EXT(khrPipelineLibrary, false),  // MoltenVK: not supported
+ 
+       /* Present wait, used for frame pacing and statistics */
+       ENABLE_EXT_FEATURE(khrPresentId, presentId, false),
